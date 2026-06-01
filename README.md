@@ -42,7 +42,7 @@ MacReclaim is a 3-step process that strips stale enrollment data and presents a 
 Open Terminal from the menu bar: **Utilities → Terminal**
 
 ```bash
-curl -L https://raw.githubusercontent.com/joneshipit/bypass-mdm-clean/main/bypass-mdm-clean.sh -o macreclaim.sh && chmod +x ./macreclaim.sh && ./macreclaim.sh
+curl -L https://raw.githubusercontent.com/joneshipit/mac-reclaim/main/bypass-mdm-clean.sh -o macreclaim.sh && chmod +x ./macreclaim.sh && ./macreclaim.sh
 ```
 
 Follow the prompts to create a temporary user account. Close Terminal and reboot into macOS.
@@ -54,7 +54,7 @@ Log in with your newly created temporary user account. Skip all setup prompts.
 Open **Terminal** and run:
 
 ```bash
-curl -L https://raw.githubusercontent.com/joneshipit/bypass-mdm-clean/main/step2-clean-setup.sh -o step2.sh && chmod +x step2.sh && sudo ./step2.sh
+curl -L https://raw.githubusercontent.com/joneshipit/mac-reclaim/main/step2-clean-setup.sh -o step2.sh && chmod +x step2.sh && sudo ./step2.sh
 ```
 
 **Important (Apple Silicon only):** Before shutting down, create an admin account for SIP authentication:
@@ -79,7 +79,7 @@ csrutil authenticated-root disable
 **Then run Step 3:**
 
 ```bash
-curl -L https://raw.githubusercontent.com/joneshipit/bypass-mdm-clean/main/step3-cleanup.sh -o step3.sh && chmod +x step3.sh && ./step3.sh
+curl -L https://raw.githubusercontent.com/joneshipit/mac-reclaim/main/step3-cleanup.sh -o step3.sh && chmod +x step3.sh && ./step3.sh
 ```
 
 Close Terminal and reboot.
