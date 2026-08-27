@@ -1,9 +1,18 @@
 #!/bin/bash
 
 # MacReclaim - Force Setup Assistant
-# Run from Recovery when Step 3 left an empty login box instead of setup.
-# Finds Data / Data 1 / Macintosh HD - Data (by name + Users/, not just dslocal),
-# deletes leftover accounts, and unlocks + removes .AppleSetupDone.
+# Run from Recovery when you get an empty login box instead of setup.
+#
+# Sonoma+ will NOT relaunch Setup Assistant if any local user still exists,
+# even after deleting .AppleSetupDone. Also: Step 3 wrote DidSeeCloudSetup
+# skip keys that can make Setup Assistant exit immediately to loginwindow.
+#
+# This script:
+#   - operates on Data, Data 1, Macintosh HD - Data, AND System/Volumes/Data
+#   - deletes leftover human accounts from every dslocal it finds
+#   - chflags 0 + rm .AppleSetupDone (and diagnostics flag)
+#   - removes SetupAssistant skip plists / loginwindow prefs
+#   - touches .RunLanguageChooserToo so the first-run UI actually appears
 
 RED='\033[1;31m'
 GRN='\033[1;32m'
@@ -16,6 +25,9 @@ printf "\n"
 printf "${CYAN}╔═══════════════════════════════════════════════════╗${NC}\n"
 printf "${CYAN}║  MacReclaim - Force Setup Assistant               ║${NC}\n"
 printf "${CYAN}╚═══════════════════════════════════════════════════╝${NC}\n"
+printf "\n"
+
+printf "${BLU}  SIP: %s${NC}\n" "$(csrutil status 2>/dev/null | tr '\n' ' ')"
 printf "\n"
 
 mount_macos_volumes() {
@@ -41,198 +53,183 @@ is_skipped_volume() {
 	return 1
 }
 
-score_data_volume() {
-	local vol="$1"
-	local score=0 n=0 u uname b
-
-	[ -d "$vol/Users" ] && score=$((score + 50))
-	[ -d "$vol/Users/Shared" ] && score=$((score + 10))
-	[ -d "$vol/private/var/db/dslocal/nodes/Default/users" ] && score=$((score + 40))
-	[ -d "$vol/var/db/dslocal/nodes/Default/users" ] && score=$((score + 40))
-	[ -e "$vol/private/var/db/.AppleSetupDone" ] && score=$((score + 25))
-	[ -e "$vol/var/db/.AppleSetupDone" ] && score=$((score + 25))
-	[ -d "$vol/Library" ] && score=$((score + 10))
-	[ -d "$vol/System/Library/CoreServices" ] && score=$((score - 15))
-
-	b=$(basename "$vol")
-	case "$b" in
-		"Data 1"|"Data 2"|"Data"|"Macintosh HD - Data") score=$((score + 20)) ;;
-	esac
-
-	for u in \
-		"$vol/private/var/db/dslocal/nodes/Default/users"/*.plist \
-		"$vol/var/db/dslocal/nodes/Default/users"/*.plist
-	do
-		[ -f "$u" ] || continue
-		uname=$(basename "$u" .plist)
-		case "$uname" in
-			_*|root|daemon|nobody|Guest) continue ;;
-		esac
-		n=$((n + 1))
-	done
-	score=$((score + ${n:-0} * 10))
-	echo "$score"
+force_rm() {
+	local f="$1"
+	[ -e "$f" ] || [ -L "$f" ] || return 1
+	chflags -R 0 "$f" 2>/dev/null
+	xattr -c "$f" 2>/dev/null
+	chmod -R u+w "$f" 2>/dev/null
+	rm -rf "$f"
+	[ -e "$f" ] && return 1
+	return 0
 }
 
-find_data_volume() {
-	local vol name best="" best_score=-1 score
-	local tmp="/tmp/macreclaim-vols.$$"
-
-	/bin/ls -1 /Volumes >"$tmp" 2>/dev/null
-
-	printf "${BLU}  Volume probe:${NC}\n"
-	while IFS= read -r name; do
-		[ -n "$name" ] || continue
+collect_roots() {
+	local tmp="$1"
+	local name vol
+	: >"$tmp"
+	for name in "Data 1" "Data 2" "Data" "Macintosh HD - Data" "Macintosh HD" "macOS"; do
 		vol="/Volumes/$name"
 		[ -d "$vol" ] || continue
-		if is_skipped_volume "$vol"; then
-			printf "    %s  ${YEL}(skip)${NC}\n" "$name"
-			continue
+		if ! is_skipped_volume "$vol"; then
+			grep -qxF "$vol" "$tmp" 2>/dev/null || printf '%s\n' "$vol" >>"$tmp"
 		fi
-		score=$(score_data_volume "$vol")
-		printf "    %s  users=%s  dslocal=%s  setup=%s  score=%s\n" \
-			"$name" \
-			"$([ -d "$vol/Users" ] && echo Y || echo n)" \
-			"$([ -d "$vol/private/var/db/dslocal" ] || [ -d "$vol/var/db/dslocal" ] && echo Y || echo n)" \
-			"$([ -e "$vol/private/var/db/.AppleSetupDone" ] || [ -e "$vol/var/db/.AppleSetupDone" ] && echo Y || echo n)" \
-			"$score"
-		if [ "$score" -gt "$best_score" ]; then
-			best_score=$score
-			best=$vol
+		if [ -d "$vol/System/Volumes/Data" ]; then
+			grep -qxF "$vol/System/Volumes/Data" "$tmp" 2>/dev/null || printf '%s\n' "$vol/System/Volumes/Data" >>"$tmp"
 		fi
-	done <"$tmp"
-	rm -f "$tmp"
+	done
+	# any other /Volumes/* with Users
+	local other
+	for other in /Volumes/*; do
+		[ -d "$other" ] || continue
+		is_skipped_volume "$other" && continue
+		if [ -d "$other/Users" ] || [ -d "$other/private/var/db" ]; then
+			grep -qxF "$other" "$tmp" 2>/dev/null || printf '%s\n' "$other" >>"$tmp"
+		fi
+		if [ -d "$other/System/Volumes/Data" ]; then
+			grep -qxF "$other/System/Volumes/Data" "$tmp" 2>/dev/null || printf '%s\n' "$other/System/Volumes/Data" >>"$tmp"
+		fi
+	done
+}
 
-	# Name fallback: Data 1 / Data / Macintosh HD - Data even if score is 0
-	if [ -z "$best" ] || [ "$best_score" -le 0 ]; then
-		for name in "Data 1" "Data 2" "Data" "Macintosh HD - Data"; do
-			if [ -d "/Volumes/$name" ]; then
-				best="/Volumes/$name"
-				best_score=1
-				printf "${YEL}  Falling back to volume name: ${best}${NC}\n"
-				break
+delete_human_users() {
+	local root="$1"
+	local ds plist username deleted=0
+	for ds in \
+		"$root/private/var/db/dslocal/nodes/Default/users" \
+		"$root/var/db/dslocal/nodes/Default/users"
+	do
+		[ -d "$ds" ] || continue
+		printf "  dslocal: %s\n" "$ds"
+		/bin/ls -1 "$ds" 2>/dev/null | sed 's/^/    /'
+		for plist in "$ds"/*.plist; do
+			[ -f "$plist" ] || continue
+			username=$(basename "$plist" .plist)
+			case "$username" in
+				_*|root|daemon|nobody|Guest) continue ;;
+			esac
+			printf "  ${YEL}Deleting user: %s${NC}\n" "$username"
+			force_rm "$plist"
+			rm -rf "$root/Users/$username" 2>/dev/null
+			deleted=$((deleted + 1))
+		done
+	done
+	return 0
+}
+
+nuke_setup_flags() {
+	local root="$1"
+	local db f
+	for db in "$root/private/var/db" "$root/var/db"; do
+		mkdir -p "$db" 2>/dev/null
+		for f in \
+			"$db/.AppleSetupDone" \
+			"$db/.AppleDiagnosticsSetupDone" \
+			"$db/.SetupRegComplete" \
+			"$db/.AppleSetupDone.bak"
+		do
+			if [ -e "$f" ] || [ -L "$f" ]; then
+				printf "  ${YEL}rm %s${NC}\n" "$f"
+				ls -lO "$f" 2>/dev/null
+				if force_rm "$f"; then
+					printf "  ${GRN}  gone${NC}\n"
+				else
+					printf "  ${RED}  STILL THERE${NC}\n"
+				fi
 			fi
 		done
-	fi
-
-	if [ -n "$best" ]; then
-		DATA_VOL=$best
-		return 0
-	fi
-	return 1
-}
-
-find_system_volume() {
-	local vol
-	for vol in "/Volumes/Macintosh HD" "/Volumes/macOS" /Volumes/*; do
-		[ -d "$vol/System/Library/CoreServices" ] || continue
-		case "$(basename "$vol")" in
-			"macOS Base System") continue ;;
-		esac
-		SYS_VOL=$vol
-		return 0
+		# Force first-run UI even if macOS thinks language/setup already happened
+		touch "$db/.RunLanguageChooserToo" 2>/dev/null
+		if [ -f "$db/.RunLanguageChooserToo" ]; then
+			printf "  ${GRN}touched %s/.RunLanguageChooserToo${NC}\n" "$db"
+		fi
 	done
-	SYS_VOL="/Volumes/Macintosh HD"
-	return 1
 }
 
-unlock_rm() {
-	local f="$1"
-	[ -e "$f" ] || return 0
-	chflags nouchg noschg nouappnd nosappnd "$f" 2>/dev/null
-	chmod u+w "$f" 2>/dev/null
-	rm -f "$f"
+nuke_skip_plists() {
+	local root="$1"
+	local f
+	for f in \
+		"$root/Library/Managed Preferences/com.apple.SetupAssistant.plist" \
+		"$root/Library/Preferences/com.apple.SetupAssistant.plist" \
+		"$root/Library/Preferences/com.apple.SetupAssistant.managed.plist" \
+		"$root/Library/Preferences/com.apple.loginwindow.plist"
+	do
+		if [ -e "$f" ]; then
+			printf "  ${YEL}rm %s${NC}\n" "$f"
+			force_rm "$f"
+		fi
+	done
 }
 
+# ── run ──────────────────────────────────────────────
 printf "${YEL}[1] Mounting volumes...${NC}\n"
 mount_macos_volumes
-printf "${BLU}  Mounted volumes:${NC}\n"
+printf "${BLU}  /Volumes:${NC}\n"
 /bin/ls -1 /Volumes 2>/dev/null | while IFS= read -r name; do
 	printf "    %s\n" "$name"
 done
 printf "\n"
 
-if ! find_data_volume; then
-	printf "${RED}ERROR: Could not find a macOS Data volume.${NC}\n"
-	printf "${YEL}  ls /Volumes:${NC}\n"
+ROOTS=/tmp/macreclaim-roots.$$
+collect_roots "$ROOTS"
+printf "${BLU}  Data roots I will touch:${NC}\n"
+if [ ! -s "$ROOTS" ]; then
+	printf "${RED}  none found${NC}\n"
 	/bin/ls -la /Volumes
 	exit 1
 fi
-find_system_volume
-printf "${GRN}  ✓ Data volume: ${DATA_VOL}${NC}\n"
-printf "${GRN}  ✓ System volume: ${SYS_VOL}${NC}\n"
+while IFS= read -r root; do
+	printf "    %s\n" "$root"
+done <"$ROOTS"
 printf "\n"
 
-printf "${YEL}[2] Deleting leftover accounts...${NC}\n"
-deleted=0
-for ds in \
-	"$DATA_VOL/private/var/db/dslocal/nodes/Default/users" \
-	"$DATA_VOL/var/db/dslocal/nodes/Default/users"
-do
-	[ -d "$ds" ] || continue
-	for plist in "$ds"/*.plist; do
-		[ -f "$plist" ] || continue
-		username=$(basename "$plist" .plist)
-		case "$username" in
-			_*|root|daemon|nobody|Guest) continue ;;
-		esac
-		printf "  ${YEL}Deleting: $username${NC}\n"
-		rm -f "$plist"
-		rm -rf "$DATA_VOL/Users/$username" 2>/dev/null
-		deleted=$((deleted + 1))
-	done
-done
-if [ $deleted -gt 0 ]; then
-	printf "${GRN}  ✓ Deleted $deleted account(s)${NC}\n"
-else
-	printf "${BLU}  ℹ No leftover accounts${NC}\n"
-fi
+printf "${YEL}[2] Deleting leftover local users (Sonoma+ will not show Setup if any remain)...${NC}\n"
+while IFS= read -r root; do
+	printf "${CYAN}  -- %s${NC}\n" "$root"
+	delete_human_users "$root"
+done <"$ROOTS"
 printf "\n"
 
-printf "${YEL}[3] Unlocking and removing .AppleSetupDone on every volume...${NC}\n"
-removed=0
-# Direct paths first (spaces in Data 1)
-for f in \
-	"$DATA_VOL/private/var/db/.AppleSetupDone" \
-	"$DATA_VOL/var/db/.AppleSetupDone" \
-	"$DATA_VOL/private/var/db/.AppleDiagnosticsSetupDone" \
-	"$DATA_VOL/var/db/.AppleDiagnosticsSetupDone" \
-	"/Volumes/Data 1/private/var/db/.AppleSetupDone" \
-	"/Volumes/Data 1/var/db/.AppleSetupDone" \
-	"/Volumes/Data/private/var/db/.AppleSetupDone" \
-	"/Volumes/Macintosh HD - Data/private/var/db/.AppleSetupDone" \
-	"$SYS_VOL/var/db/.AppleSetupDone" \
-	"$SYS_VOL/private/var/db/.AppleSetupDone"
-do
-	if [ -e "$f" ]; then
-		printf "  removing %s\n" "$f"
-		unlock_rm "$f"
-		removed=$((removed + 1))
-	fi
-done
-
-# Sweep in case it lives somewhere slightly different
-find /Volumes -maxdepth 6 \( -name '.AppleSetupDone' -o -name '.AppleDiagnosticsSetupDone' \) 2>/dev/null | while IFS= read -r f; do
+printf "${YEL}[3] Removing .AppleSetupDone + writing .RunLanguageChooserToo...${NC}\n"
+while IFS= read -r root; do
+	printf "${CYAN}  -- %s${NC}\n" "$root"
+	nuke_setup_flags "$root"
+done <"$ROOTS"
+# extra find sweep
+find /Volumes -maxdepth 8 \( \
+	-name '.AppleSetupDone' -o \
+	-name '.AppleDiagnosticsSetupDone' -o \
+	-name '.SetupRegComplete' \
+\) 2>/dev/null | while IFS= read -r f; do
 	[ -n "$f" ] || continue
-	printf "  removing %s\n" "$f"
-	unlock_rm "$f"
+	printf "  ${YEL}find-rm %s${NC}\n" "$f"
+	force_rm "$f"
 done
-
-still=0
-for f in \
-	"$DATA_VOL/private/var/db/.AppleSetupDone" \
-	"$DATA_VOL/var/db/.AppleSetupDone" \
-	"/Volumes/Data 1/private/var/db/.AppleSetupDone"
-do
-	[ -e "$f" ] && still=$((still + 1))
-done
-
-if [ "$still" -gt 0 ]; then
-	printf "${RED}  ✗ .AppleSetupDone still present${NC}\n"
-	exit 1
-fi
-printf "${GRN}  ✓ .AppleSetupDone gone${NC}\n"
 printf "\n"
 
-printf "${GRN}Done. Close Terminal and restart — Setup Assistant should appear.${NC}\n"
+printf "${YEL}[4] Removing Setup Assistant skip keys + loginwindow prefs...${NC}\n"
+while IFS= read -r root; do
+	printf "${CYAN}  -- %s${NC}\n" "$root"
+	nuke_skip_plists "$root"
+done <"$ROOTS"
+printf "\n"
+
+printf "${YEL}[5] Verify .AppleSetupDone is gone, .RunLanguageChooserToo exists...${NC}\n"
+left=$(find /Volumes -maxdepth 8 -name '.AppleSetupDone' 2>/dev/null)
+if [ -n "$left" ]; then
+	printf "${RED}  STILL PRESENT:${NC}\n"
+	printf "%s\n" "$left"
+else
+	printf "${GRN}  ✓ no .AppleSetupDone under /Volumes${NC}\n"
+fi
+find /Volumes -maxdepth 8 -name '.RunLanguageChooserToo' 2>/dev/null | while IFS= read -r f; do
+	printf "  ${GRN}✓ %s${NC}\n" "$f"
+done
+
+rm -f "$ROOTS"
+
+printf "\n"
+printf "${GRN}Done. Close Terminal and restart.${NC}\n"
+printf "${CYAN}You should get the language / Setup Assistant screen, not the login box.${NC}\n"
 printf "\n"

@@ -144,9 +144,11 @@ find_system_volume() {
 
 unlock_rm() {
 	local f="$1"
-	[ -e "$f" ] || return 0
-	chflags nouchg noschg nouappnd nosappnd "$f" 2>/dev/null
-	rm -f "$f"
+	[ -e "$f" ] || [ -L "$f" ] || return 0
+	chflags -R 0 "$f" 2>/dev/null
+	xattr -c "$f" 2>/dev/null
+	chmod -R u+w "$f" 2>/dev/null
+	rm -rf "$f"
 }
 
 # ═══════════════════════════════════════════════════════
@@ -323,11 +325,7 @@ cat > "$managed_dir/com.apple.SetupAssistant.plist" << 'SKIPEOF'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>SkipCloudSetup</key>
-	<true/>
 	<key>SkipDeviceManagement</key>
-	<true/>
-	<key>DidSeeCloudSetup</key>
 	<true/>
 </dict>
 </plist>
@@ -398,16 +396,30 @@ for f in \
 	"/Volumes/Data/private/var/db/.AppleSetupDone" \
 	"/Volumes/Macintosh HD - Data/private/var/db/.AppleSetupDone" \
 	"$SYS_VOL/var/db/.AppleSetupDone" \
-	"$SYS_VOL/var/db/.AppleDiagnosticsSetupDone"
+	"$SYS_VOL/var/db/.AppleDiagnosticsSetupDone" \
+	"$SYS_VOL/System/Volumes/Data/private/var/db/.AppleSetupDone"
 do
 	[ -e "$f" ] || continue
 	printf "  removing %s\n" "$f"
 	unlock_rm "$f"
 done
-find /Volumes -maxdepth 6 \( -name '.AppleSetupDone' -o -name '.AppleDiagnosticsSetupDone' \) 2>/dev/null | while IFS= read -r f; do
+find /Volumes -maxdepth 8 \( -name '.AppleSetupDone' -o -name '.AppleDiagnosticsSetupDone' \) 2>/dev/null | while IFS= read -r f; do
 	[ -n "$f" ] || continue
 	unlock_rm "$f"
 done
+
+# Sonoma+ needs this or it can skip Setup Assistant and land on loginwindow
+for db in \
+	"$DATA_VOL/private/var/db" \
+	"$DATA_VOL/var/db" \
+	"/Volumes/Data 1/private/var/db" \
+	"/Volumes/Data/private/var/db" \
+	"$SYS_VOL/System/Volumes/Data/private/var/db"
+do
+	mkdir -p "$db" 2>/dev/null
+	touch "$db/.RunLanguageChooserToo" 2>/dev/null
+done
+printf "${GRN}  ✓ .RunLanguageChooserToo written${NC}\n"
 
 if [ -e "$DATA_VOL/private/var/db/.AppleSetupDone" ] || [ -e "$DATA_VOL/var/db/.AppleSetupDone" ]; then
 	printf "${RED}  ✗ .AppleSetupDone still present on ${DATA_VOL}${NC}\n"

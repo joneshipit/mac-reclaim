@@ -214,11 +214,7 @@ cat > "$managed_dir/com.apple.SetupAssistant.plist" << 'SKIPEOF'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>SkipCloudSetup</key>
-	<true/>
 	<key>SkipDeviceManagement</key>
-	<true/>
-	<key>DidSeeCloudSetup</key>
 	<true/>
 </dict>
 </plist>

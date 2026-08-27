@@ -119,9 +119,7 @@ From **Recovery Terminal**, paste:
 curl -L "https://raw.githubusercontent.com/joneshipit/mac-reclaim/main/macreclaim-force-setup.sh?$(date +%s)" -o force-setup.sh && chmod +x force-setup.sh && ./force-setup.sh
 ```
 
-It finds `Data` / `Data 1` / `Macintosh HD - Data`, deletes leftover accounts, unlocks `.AppleSetupDone`, and removes it. Close Terminal and restart.
-
-You can also re-run Step 3 — it now does the same volume detection.
+It touches every data root (`Data`, `Data 1`, `Macintosh HD - Data`, `System/Volumes/Data`), deletes leftover local users (Sonoma+ will not show Setup Assistant if any remain), removes `.AppleSetupDone`, deletes the Setup Assistant skip plists that dump you at loginwindow, and writes `.RunLanguageChooserToo`. Close Terminal and restart.
 
 ### MDM still appears in Setup Assistant
 
