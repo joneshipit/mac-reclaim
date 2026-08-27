@@ -119,9 +119,7 @@ From **Recovery Terminal**, paste:
 curl -L "https://raw.githubusercontent.com/joneshipit/mac-reclaim/main/macreclaim-force-setup.sh?$(date +%s)" -o force-setup.sh && chmod +x force-setup.sh && ./force-setup.sh
 ```
 
-On **Sonoma and later**, Setup Assistant will not come back once you are at the login window. The script creates a local admin on the APFS **Data** volume instead.
-
-At the empty login box, type the username and password you set (there are no user tiles). Default username is `reclaim` if you just press Return.
+On **Sonoma 14.x**, Setup Assistant still runs if every local user (UniqueID ≥ 500) is gone, `.AppleSetupDone` is unlocked and deleted, and `.RunLanguageChooserToo` is present. The script does that on the APFS Data volume (`Data`, `Data 1`, `Macintosh HD - Data`). Close Terminal and restart — you should get Hello / create account, not the empty login box.
 
 ### MDM still appears in Setup Assistant
 

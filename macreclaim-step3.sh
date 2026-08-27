@@ -359,24 +359,38 @@ printf "\n"
 # CLEANUP: Delete all users & remove .AppleSetupDone
 # Step 1 locks .AppleSetupDone with uchg — rm -f is a no-op until unlocked.
 # ═══════════════════════════════════════════════════════
-printf "${YEL}[7] Deleting temporary accounts...${NC}\n"
+printf "${YEL}[7] Deleting local accounts (UID >= 500 blocks Setup Assistant on Sonoma)...${NC}\n"
+
+user_uid() {
+	local plist="$1" uid
+	uid=$(/usr/libexec/PlistBuddy -c 'Print :UniqueID:0' "$plist" 2>/dev/null)
+	[ -n "$uid" ] || uid=$(/usr/libexec/PlistBuddy -c 'Print :UniqueID' "$plist" 2>/dev/null)
+	printf '%s' "$uid" | tr -dc '0-9-'
+}
 
 deleted=0
-for DSLOCAL in \
-	"$DATA_VOL/private/var/db/dslocal/nodes/Default/users" \
-	"$DATA_VOL/var/db/dslocal/nodes/Default/users"
-do
-	[ -d "$DSLOCAL" ] || continue
-	for plist in "$DSLOCAL"/*.plist; do
-		[ -f "$plist" ] || continue
-		username=$(basename "$plist" .plist)
-		case "$username" in
-			_*|root|daemon|nobody|Guest) continue ;;
-		esac
-		printf "  ${YEL}Deleting: $username${NC}\n"
-		rm -f "$plist"
-		rm -rf "$DATA_VOL/Users/$username" 2>/dev/null
-		deleted=$((deleted + 1))
+for root in "$DATA_VOL" "/Volumes/Data 1" "/Volumes/Data" "/Volumes/Macintosh HD - Data" "$SYS_VOL/System/Volumes/Data"; do
+	[ -d "$root" ] || continue
+	for DSLOCAL in \
+		"$root/private/var/db/dslocal/nodes/Default/users" \
+		"$root/var/db/dslocal/nodes/Default/users"
+	do
+		[ -d "$DSLOCAL" ] || continue
+		for plist in "$DSLOCAL"/*.plist; do
+			[ -f "$plist" ] || continue
+			username=$(basename "$plist" .plist)
+			case "$username" in
+				root|daemon|nobody|Guest) continue ;;
+			esac
+			uid=$(user_uid "$plist")
+			if [ -n "$uid" ] && [ "$uid" -lt 500 ] 2>/dev/null; then
+				continue
+			fi
+			printf "  ${YEL}Deleting: %s (uid %s) on %s${NC}\n" "$username" "${uid:-?}" "$root"
+			unlock_rm "$plist"
+			rm -rf "$root/Users/$username" 2>/dev/null
+			deleted=$((deleted + 1))
+		done
 	done
 done
 
