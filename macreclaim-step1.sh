@@ -19,23 +19,43 @@ mount_macos_volumes() {
 }
 
 find_data_volume() {
-	local vol best="" best_score=-1 score
+	local vol name best="" best_score=-1 score
+	local tmp="/tmp/macreclaim-vols.$$"
 
-	for vol in /Volumes/*; do
+	/bin/ls -1 /Volumes >"$tmp" 2>/dev/null
+	while IFS= read -r name; do
+		[ -n "$name" ] || continue
+		vol="/Volumes/$name"
 		[ -d "$vol" ] || continue
-		case "$vol" in
-			"/Volumes/macOS Base System"|"/Volumes/Preboot"|"/Volumes/Recovery"|"/Volumes/VM") continue ;;
+		case "$name" in
+			"macOS Base System"|"Preboot"|"Recovery"|"VM"|".fseventsd") continue ;;
 		esac
-		[ -d "$vol/System/Library/CoreServices" ] && continue
-		[ -d "$vol/private/var/db/dslocal/nodes/Default" ] || continue
-		score=10
-		[ -d "$vol/Users" ] && score=$((score + 20))
-		[ -f "$vol/private/var/db/.AppleSetupDone" ] && score=$((score + 5))
+		score=0
+		[ -d "$vol/Users" ] && score=$((score + 50))
+		[ -d "$vol/private/var/db/dslocal/nodes/Default" ] && score=$((score + 40))
+		[ -d "$vol/var/db/dslocal/nodes/Default" ] && score=$((score + 40))
+		[ -e "$vol/private/var/db/.AppleSetupDone" ] && score=$((score + 10))
+		[ -d "$vol/Library" ] && score=$((score + 10))
+		[ -d "$vol/System/Library/CoreServices" ] && score=$((score - 15))
+		case "$name" in
+			"Data 1"|"Data 2"|"Data"|"Macintosh HD - Data") score=$((score + 20)) ;;
+		esac
+		echo "  $name score=$score"
 		if [ "$score" -gt "$best_score" ]; then
 			best_score=$score
 			best=$vol
 		fi
-	done
+	done <"$tmp"
+	rm -f "$tmp"
+
+	if [ -z "$best" ] || [ "$best_score" -le 0 ]; then
+		for name in "Data 1" "Data 2" "Data" "Macintosh HD - Data"; do
+			if [ -d "/Volumes/$name" ]; then
+				best="/Volumes/$name"
+				break
+			fi
+		done
+	fi
 
 	if [ -n "$best" ]; then
 		DATA_VOL=$best

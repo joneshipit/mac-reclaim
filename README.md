@@ -116,7 +116,7 @@ Step 3 used to only look at `/Volumes/Data` and `rm -f` a locked `.AppleSetupDon
 From **Recovery Terminal**, paste:
 
 ```bash
-curl -L https://raw.githubusercontent.com/joneshipit/mac-reclaim/main/macreclaim-force-setup.sh -o force-setup.sh && chmod +x force-setup.sh && ./force-setup.sh
+curl -L "https://raw.githubusercontent.com/joneshipit/mac-reclaim/main/macreclaim-force-setup.sh?$(date +%s)" -o force-setup.sh && chmod +x force-setup.sh && ./force-setup.sh
 ```
 
 It finds `Data` / `Data 1` / `Macintosh HD - Data`, deletes leftover accounts, unlocks `.AppleSetupDone`, and removes it. Close Terminal and restart.

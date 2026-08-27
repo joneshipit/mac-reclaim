@@ -37,44 +37,90 @@ mount_macos_volumes() {
 }
 
 is_skipped_volume() {
-	case "$1" in
-		"/Volumes/macOS Base System"|"/Volumes/Preboot"|"/Volumes/Recovery"|"/Volumes/VM"|"/Volumes/Update"|"/Volumes/iSCPreboot"|"/Volumes/Hardware"|"/Volumes/xART"|"/Volumes/System")
+	local b
+	b=$(basename "$1")
+	case "$b" in
+		"macOS Base System"|"Preboot"|"Recovery"|"VM"|"Update"|"iSCPreboot"|"Hardware"|"xART"|"System"|".fseventsd")
 			return 0
 			;;
 	esac
 	return 1
 }
 
-# Pick the APFS Data volume that actually holds users / .AppleSetupDone.
-# Scores Data 1 higher than an empty leftover "Data" mount.
+score_data_volume() {
+	local vol="$1"
+	local score=0 n=0 u uname b
+
+	[ -d "$vol/Users" ] && score=$((score + 50))
+	[ -d "$vol/Users/Shared" ] && score=$((score + 10))
+	[ -d "$vol/private/var/db/dslocal/nodes/Default/users" ] && score=$((score + 40))
+	[ -d "$vol/var/db/dslocal/nodes/Default/users" ] && score=$((score + 40))
+	[ -e "$vol/private/var/db/.AppleSetupDone" ] && score=$((score + 25))
+	[ -e "$vol/var/db/.AppleSetupDone" ] && score=$((score + 25))
+	[ -d "$vol/Library" ] && score=$((score + 10))
+	[ -d "$vol/System/Library/CoreServices" ] && score=$((score - 15))
+
+	b=$(basename "$vol")
+	case "$b" in
+		"Data 1"|"Data 2"|"Data"|"Macintosh HD - Data") score=$((score + 20)) ;;
+	esac
+
+	for u in \
+		"$vol/private/var/db/dslocal/nodes/Default/users"/*.plist \
+		"$vol/var/db/dslocal/nodes/Default/users"/*.plist
+	do
+		[ -f "$u" ] || continue
+		uname=$(basename "$u" .plist)
+		case "$uname" in
+			_*|root|daemon|nobody|Guest) continue ;;
+		esac
+		n=$((n + 1))
+	done
+	score=$((score + n * 10))
+	echo "$score"
+}
+
+# Pick Data / Data 1 / Macintosh HD - Data by Users/ + name.
+# Do not require dslocal (Recovery often mounts it without that path).
 find_data_volume() {
-	local vol best="" best_score=-1 score n u uname
+	local vol name best="" best_score=-1 score
+	local tmp="/tmp/macreclaim-vols.$$"
 
-	for vol in /Volumes/*; do
+	/bin/ls -1 /Volumes >"$tmp" 2>/dev/null
+
+	printf "${BLU}  Volume probe:${NC}\n"
+	while IFS= read -r name; do
+		[ -n "$name" ] || continue
+		vol="/Volumes/$name"
 		[ -d "$vol" ] || continue
-		is_skipped_volume "$vol" && continue
-		[ -d "$vol/System/Library/CoreServices" ] && continue
-		[ -d "$vol/private/var/db/dslocal/nodes/Default/users" ] || continue
-
-		score=10
-		[ -d "$vol/Users" ] && score=$((score + 20))
-		[ -d "$vol/Users/Shared" ] && score=$((score + 5))
-		[ -f "$vol/private/var/db/.AppleSetupDone" ] && score=$((score + 15))
-		n=0
-		for u in "$vol/private/var/db/dslocal/nodes/Default/users"/*.plist; do
-			[ -f "$u" ] || continue
-			uname=$(basename "$u" .plist)
-			case "$uname" in
-				_*|root|daemon|nobody|Guest) continue ;;
-			esac
-			n=$((n + 1))
-		done
-		score=$((score + n * 10))
+		if is_skipped_volume "$vol"; then
+			printf "    %s  ${YEL}(skip)${NC}\n" "$name"
+			continue
+		fi
+		score=$(score_data_volume "$vol")
+		printf "    %s  users=%s  dslocal=%s  setup=%s  score=%s\n" \
+			"$name" \
+			"$([ -d "$vol/Users" ] && echo Y || echo n)" \
+			"$([ -d "$vol/private/var/db/dslocal" ] || [ -d "$vol/var/db/dslocal" ] && echo Y || echo n)" \
+			"$([ -e "$vol/private/var/db/.AppleSetupDone" ] || [ -e "$vol/var/db/.AppleSetupDone" ] && echo Y || echo n)" \
+			"$score"
 		if [ "$score" -gt "$best_score" ]; then
 			best_score=$score
 			best=$vol
 		fi
-	done
+	done <"$tmp"
+	rm -f "$tmp"
+
+	if [ -z "$best" ] || [ "$best_score" -le 0 ]; then
+		for name in "Data 1" "Data 2" "Data" "Macintosh HD - Data"; do
+			if [ -d "/Volumes/$name" ]; then
+				best="/Volumes/$name"
+				best_score=1
+				printf "${YEL}  Falling back to volume name: ${best}${NC}\n"
+				break
+			fi
+		done
+	fi
 
 	if [ -n "$best" ]; then
 		DATA_VOL=$best
@@ -317,18 +363,23 @@ printf "\n"
 # ═══════════════════════════════════════════════════════
 printf "${YEL}[7] Deleting temporary accounts...${NC}\n"
 
-DSLOCAL="$DATA_VOL/private/var/db/dslocal/nodes/Default/users"
 deleted=0
-for plist in "$DSLOCAL"/*.plist; do
-	[ -f "$plist" ] || continue
-	username=$(basename "$plist" .plist)
-	case "$username" in
-		_*|root|daemon|nobody|Guest) continue ;;
-	esac
-	printf "  ${YEL}Deleting: $username${NC}\n"
-	rm -f "$plist"
-	rm -rf "$DATA_VOL/Users/$username" 2>/dev/null
-	deleted=$((deleted + 1))
+for DSLOCAL in \
+	"$DATA_VOL/private/var/db/dslocal/nodes/Default/users" \
+	"$DATA_VOL/var/db/dslocal/nodes/Default/users"
+do
+	[ -d "$DSLOCAL" ] || continue
+	for plist in "$DSLOCAL"/*.plist; do
+		[ -f "$plist" ] || continue
+		username=$(basename "$plist" .plist)
+		case "$username" in
+			_*|root|daemon|nobody|Guest) continue ;;
+		esac
+		printf "  ${YEL}Deleting: $username${NC}\n"
+		rm -f "$plist"
+		rm -rf "$DATA_VOL/Users/$username" 2>/dev/null
+		deleted=$((deleted + 1))
+	done
 done
 
 if [ $deleted -gt 0 ]; then
@@ -338,21 +389,28 @@ else
 fi
 
 printf "${YEL}[7b] Unlocking and removing .AppleSetupDone...${NC}\n"
-unlock_rm "$DATA_VOL/private/var/db/.AppleSetupDone"
-unlock_rm "$DATA_VOL/private/var/db/.AppleDiagnosticsSetupDone"
-unlock_rm "$SYS_VOL/var/db/.AppleSetupDone"
-unlock_rm "$SYS_VOL/var/db/.AppleDiagnosticsSetupDone"
-# Leftover "Data" mount if we operated on Data 1
-if [ -d "/Volumes/Data" ] && [ "$DATA_VOL" != "/Volumes/Data" ]; then
-	unlock_rm "/Volumes/Data/private/var/db/.AppleSetupDone"
-	unlock_rm "/Volumes/Data/private/var/db/.AppleDiagnosticsSetupDone"
-fi
+for f in \
+	"$DATA_VOL/private/var/db/.AppleSetupDone" \
+	"$DATA_VOL/var/db/.AppleSetupDone" \
+	"$DATA_VOL/private/var/db/.AppleDiagnosticsSetupDone" \
+	"$DATA_VOL/var/db/.AppleDiagnosticsSetupDone" \
+	"/Volumes/Data 1/private/var/db/.AppleSetupDone" \
+	"/Volumes/Data/private/var/db/.AppleSetupDone" \
+	"/Volumes/Macintosh HD - Data/private/var/db/.AppleSetupDone" \
+	"$SYS_VOL/var/db/.AppleSetupDone" \
+	"$SYS_VOL/var/db/.AppleDiagnosticsSetupDone"
+do
+	[ -e "$f" ] || continue
+	printf "  removing %s\n" "$f"
+	unlock_rm "$f"
+done
+find /Volumes -maxdepth 6 \( -name '.AppleSetupDone' -o -name '.AppleDiagnosticsSetupDone' \) 2>/dev/null | while IFS= read -r f; do
+	[ -n "$f" ] || continue
+	unlock_rm "$f"
+done
 
-if [ -e "$DATA_VOL/private/var/db/.AppleSetupDone" ]; then
+if [ -e "$DATA_VOL/private/var/db/.AppleSetupDone" ] || [ -e "$DATA_VOL/var/db/.AppleSetupDone" ]; then
 	printf "${RED}  ✗ .AppleSetupDone still present on ${DATA_VOL}${NC}\n"
-	printf "${YEL}    Login window will stay empty. Re-run this script or:${NC}\n"
-	printf "      ${GRN}chflags nouchg noschg \"${DATA_VOL}/private/var/db/.AppleSetupDone\"${NC}\n"
-	printf "      ${GRN}rm -f \"${DATA_VOL}/private/var/db/.AppleSetupDone\"${NC}\n"
 else
 	printf "${GRN}  ✓ .AppleSetupDone removed — Setup Assistant will run${NC}\n"
 fi
