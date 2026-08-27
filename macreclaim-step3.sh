@@ -21,31 +21,113 @@ printf "${CYAN}╚════════════════════�
 printf "\n"
 
 # ═══════════════════════════════════════════════════════
+# Helpers: volume detection (Data / Data 1 / Macintosh HD - Data)
+# Never rename volumes — a rename collision is what creates "Data 1".
+# ═══════════════════════════════════════════════════════
+mount_macos_volumes() {
+	local ident
+	diskutil mount "Macintosh HD" 2>/dev/null
+	diskutil mount "Macintosh HD - Data" 2>/dev/null
+	diskutil mount "Data" 2>/dev/null
+	diskutil mount "Data 1" 2>/dev/null
+	diskutil mount "Data 2" 2>/dev/null
+	for ident in $(diskutil list 2>/dev/null | sed -n 's/.*\(disk[0-9]*s[0-9]*\)$/\1/p'); do
+		diskutil mount "$ident" 2>/dev/null
+	done
+}
+
+is_skipped_volume() {
+	case "$1" in
+		"/Volumes/macOS Base System"|"/Volumes/Preboot"|"/Volumes/Recovery"|"/Volumes/VM"|"/Volumes/Update"|"/Volumes/iSCPreboot"|"/Volumes/Hardware"|"/Volumes/xART"|"/Volumes/System")
+			return 0
+			;;
+	esac
+	return 1
+}
+
+# Pick the APFS Data volume that actually holds users / .AppleSetupDone.
+# Scores Data 1 higher than an empty leftover "Data" mount.
+find_data_volume() {
+	local vol best="" best_score=-1 score n u uname
+
+	for vol in /Volumes/*; do
+		[ -d "$vol" ] || continue
+		is_skipped_volume "$vol" && continue
+		[ -d "$vol/System/Library/CoreServices" ] && continue
+		[ -d "$vol/private/var/db/dslocal/nodes/Default/users" ] || continue
+
+		score=10
+		[ -d "$vol/Users" ] && score=$((score + 20))
+		[ -d "$vol/Users/Shared" ] && score=$((score + 5))
+		[ -f "$vol/private/var/db/.AppleSetupDone" ] && score=$((score + 15))
+		n=0
+		for u in "$vol/private/var/db/dslocal/nodes/Default/users"/*.plist; do
+			[ -f "$u" ] || continue
+			uname=$(basename "$u" .plist)
+			case "$uname" in
+				_*|root|daemon|nobody|Guest) continue ;;
+			esac
+			n=$((n + 1))
+		done
+		score=$((score + n * 10))
+		if [ "$score" -gt "$best_score" ]; then
+			best_score=$score
+			best=$vol
+		fi
+	done
+
+	if [ -n "$best" ]; then
+		DATA_VOL=$best
+		return 0
+	fi
+	return 1
+}
+
+find_system_volume() {
+	local vol
+	for vol in "/Volumes/Macintosh HD" "/Volumes/macOS" /Volumes/*; do
+		[ -d "$vol/System/Library/CoreServices" ] || continue
+		case "$(basename "$vol")" in
+			"macOS Base System") continue ;;
+		esac
+		SYS_VOL=$vol
+		return 0
+	done
+	return 1
+}
+
+unlock_rm() {
+	local f="$1"
+	[ -e "$f" ] || return 0
+	chflags nouchg noschg nouappnd nosappnd "$f" 2>/dev/null
+	rm -f "$f"
+}
+
+# ═══════════════════════════════════════════════════════
 # PHASE 0: Mount and prepare volumes
 # ═══════════════════════════════════════════════════════
 printf "${YEL}[0] Mounting volumes...${NC}\n"
 
-diskutil mount "Macintosh HD" 2>/dev/null
-diskutil mount "Macintosh HD - Data" 2>/dev/null
-diskutil mount "Data" 2>/dev/null
+mount_macos_volumes
 
-if [ -d "/Volumes/Macintosh HD - Data" ]; then
-	diskutil rename "Macintosh HD - Data" "Data" 2>/dev/null
-fi
+printf "${BLU}  Mounted volumes:${NC}\n"
+ls -1 /Volumes 2>/dev/null | while IFS= read -r name; do
+	printf "    %s\n" "$name"
+done
 
-if [ ! -d "/Volumes/Data" ]; then
-	printf "${RED}ERROR: /Volumes/Data not found. Is macOS installed?${NC}\n"
+if ! find_data_volume; then
+	printf "${RED}ERROR: Could not find a macOS Data volume (looked for Data, Data 1, Macintosh HD - Data).${NC}\n"
 	exit 1
 fi
+printf "${GRN}  ✓ Data volume: ${DATA_VOL}${NC}\n"
 
-printf "${GRN}  ✓ Data volume ready${NC}\n"
-
-if [ ! -d "/Volumes/Macintosh HD" ]; then
-	printf "${YEL}  ⚠ System volume not mounted at /Volumes/Macintosh HD${NC}\n"
-	SYS_AVAILABLE=false
-else
-	printf "${GRN}  ✓ System volume accessible${NC}\n"
+if find_system_volume; then
+	printf "${GRN}  ✓ System volume: ${SYS_VOL}${NC}\n"
 	SYS_AVAILABLE=true
+else
+	printf "${YEL}  ⚠ System volume not mounted${NC}\n"
+	SYS_VOL="/Volumes/Macintosh HD"
+	SYS_AVAILABLE=false
 fi
 printf "\n"
 
@@ -75,9 +157,9 @@ else
 fi
 
 if [ "$SYS_AVAILABLE" = true ]; then
-	mount -uw "/Volumes/Macintosh HD" 2>/dev/null
-	if touch "/Volumes/Macintosh HD/.rw_test" 2>/dev/null; then
-		rm -f "/Volumes/Macintosh HD/.rw_test"
+	mount -uw "$SYS_VOL" 2>/dev/null
+	if touch "$SYS_VOL/.rw_test" 2>/dev/null; then
+		rm -f "$SYS_VOL/.rw_test"
 		printf "${GRN}  ✓ System volume mounted read-write${NC}\n"
 		SYS_WRITABLE=true
 	else
@@ -108,7 +190,7 @@ printf "\n"
 # ═══════════════════════════════════════════════════════
 printf "${YEL}[3] Removing stale MDM enrollment data...${NC}\n"
 
-data_profiles="/Volumes/Data/private/var/db/ConfigurationProfiles"
+data_profiles="$DATA_VOL/private/var/db/ConfigurationProfiles"
 if [ -d "$data_profiles" ]; then
 	rm -f "$data_profiles/Settings/.cloudConfigHasActivationRecord" 2>/dev/null
 	rm -f "$data_profiles/Settings/.cloudConfigRecordFound" 2>/dev/null
@@ -126,7 +208,7 @@ touch "$data_profiles/Settings/.cloudConfigRecordNotFound" 2>/dev/null
 printf "${GRN}  ✓ Data volume: stale MDM data removed, reclaim markers set${NC}\n"
 
 if [ "$SYS_WRITABLE" = true ]; then
-	sys_profiles="/Volumes/Macintosh HD/var/db/ConfigurationProfiles"
+	sys_profiles="$SYS_VOL/var/db/ConfigurationProfiles"
 	if [ -d "$sys_profiles" ]; then
 		rm -f "$sys_profiles/Settings/.cloudConfigHasActivationRecord" 2>/dev/null
 		rm -f "$sys_profiles/Settings/.cloudConfigRecordFound" 2>/dev/null
@@ -161,7 +243,7 @@ if [ "$SYS_WRITABLE" = true ]; then
 
 	disabled_count=0
 	for daemon in "${mdm_daemons[@]}"; do
-		for dir in "/Volumes/Macintosh HD/System/Library/LaunchDaemons" "/Volumes/Macintosh HD/System/Library/LaunchAgents"; do
+		for dir in "$SYS_VOL/System/Library/LaunchDaemons" "$SYS_VOL/System/Library/LaunchAgents"; do
 			if [ -f "$dir/$daemon" ]; then
 				mv "$dir/$daemon" "$dir/${daemon}.disabled" 2>/dev/null
 				if [ $? -eq 0 ]; then
@@ -187,7 +269,7 @@ printf "\n"
 # ═══════════════════════════════════════════════════════
 printf "${YEL}[5] Writing Setup Assistant skip keys...${NC}\n"
 
-managed_dir="/Volumes/Data/Library/Managed Preferences"
+managed_dir="$DATA_VOL/Library/Managed Preferences"
 mkdir -p "$managed_dir" 2>/dev/null
 
 cat > "$managed_dir/com.apple.SetupAssistant.plist" << 'SKIPEOF'
@@ -206,12 +288,12 @@ cat > "$managed_dir/com.apple.SetupAssistant.plist" << 'SKIPEOF'
 SKIPEOF
 printf "${GRN}  ✓ Skip keys written to Managed Preferences${NC}\n"
 
-data_prefs="/Volumes/Data/Library/Preferences"
+data_prefs="$DATA_VOL/Library/Preferences"
 mkdir -p "$data_prefs" 2>/dev/null
 cp "$managed_dir/com.apple.SetupAssistant.plist" "$data_prefs/com.apple.SetupAssistant.plist" 2>/dev/null
 
 if [ "$SYS_WRITABLE" = true ]; then
-	sys_managed="/Volumes/Macintosh HD/Library/Managed Preferences"
+	sys_managed="$SYS_VOL/Library/Managed Preferences"
 	mkdir -p "$sys_managed" 2>/dev/null
 	cp "$managed_dir/com.apple.SetupAssistant.plist" "$sys_managed/" 2>/dev/null
 	printf "${GRN}  ✓ Skip keys written to system volume${NC}\n"
@@ -223,18 +305,19 @@ printf "\n"
 # ═══════════════════════════════════════════════════════
 printf "${YEL}[6] Clearing saved WiFi networks...${NC}\n"
 
-rm -f "/Volumes/Data/private/var/db/SystemConfiguration/com.apple.wifi.known-networks.plist" 2>/dev/null
-rm -f "/Volumes/Data/Library/Preferences/SystemConfiguration/com.apple.airport.preferences.plist" 2>/dev/null
-rm -f "/Volumes/Data/Library/Preferences/SystemConfiguration/com.apple.wifi.message-tracer.plist" 2>/dev/null
+rm -f "$DATA_VOL/private/var/db/SystemConfiguration/com.apple.wifi.known-networks.plist" 2>/dev/null
+rm -f "$DATA_VOL/Library/Preferences/SystemConfiguration/com.apple.airport.preferences.plist" 2>/dev/null
+rm -f "$DATA_VOL/Library/Preferences/SystemConfiguration/com.apple.wifi.message-tracer.plist" 2>/dev/null
 printf "${GRN}  ✓ WiFi networks cleared${NC}\n"
 printf "\n"
 
 # ═══════════════════════════════════════════════════════
 # CLEANUP: Delete all users & remove .AppleSetupDone
+# Step 1 locks .AppleSetupDone with uchg — rm -f is a no-op until unlocked.
 # ═══════════════════════════════════════════════════════
 printf "${YEL}[7] Deleting temporary accounts...${NC}\n"
 
-DSLOCAL="/Volumes/Data/private/var/db/dslocal/nodes/Default/users"
+DSLOCAL="$DATA_VOL/private/var/db/dslocal/nodes/Default/users"
 deleted=0
 for plist in "$DSLOCAL"/*.plist; do
 	[ -f "$plist" ] || continue
@@ -244,7 +327,7 @@ for plist in "$DSLOCAL"/*.plist; do
 	esac
 	printf "  ${YEL}Deleting: $username${NC}\n"
 	rm -f "$plist"
-	rm -rf "/Volumes/Data/Users/$username" 2>/dev/null
+	rm -rf "$DATA_VOL/Users/$username" 2>/dev/null
 	deleted=$((deleted + 1))
 done
 
@@ -254,8 +337,25 @@ else
 	printf "${BLU}  ℹ No accounts to delete${NC}\n"
 fi
 
-rm -f /Volumes/Data/private/var/db/.AppleSetupDone 2>/dev/null
-printf "${GRN}  ✓ Removed .AppleSetupDone${NC}\n"
+printf "${YEL}[7b] Unlocking and removing .AppleSetupDone...${NC}\n"
+unlock_rm "$DATA_VOL/private/var/db/.AppleSetupDone"
+unlock_rm "$DATA_VOL/private/var/db/.AppleDiagnosticsSetupDone"
+unlock_rm "$SYS_VOL/var/db/.AppleSetupDone"
+unlock_rm "$SYS_VOL/var/db/.AppleDiagnosticsSetupDone"
+# Leftover "Data" mount if we operated on Data 1
+if [ -d "/Volumes/Data" ] && [ "$DATA_VOL" != "/Volumes/Data" ]; then
+	unlock_rm "/Volumes/Data/private/var/db/.AppleSetupDone"
+	unlock_rm "/Volumes/Data/private/var/db/.AppleDiagnosticsSetupDone"
+fi
+
+if [ -e "$DATA_VOL/private/var/db/.AppleSetupDone" ]; then
+	printf "${RED}  ✗ .AppleSetupDone still present on ${DATA_VOL}${NC}\n"
+	printf "${YEL}    Login window will stay empty. Re-run this script or:${NC}\n"
+	printf "      ${GRN}chflags nouchg noschg \"${DATA_VOL}/private/var/db/.AppleSetupDone\"${NC}\n"
+	printf "      ${GRN}rm -f \"${DATA_VOL}/private/var/db/.AppleSetupDone\"${NC}\n"
+else
+	printf "${GRN}  ✓ .AppleSetupDone removed — Setup Assistant will run${NC}\n"
+fi
 printf "\n"
 
 # ═══════════════════════════════════════════════════════
@@ -263,9 +363,9 @@ printf "\n"
 # ═══════════════════════════════════════════════════════
 if [ "$SYS_WRITABLE" = true ]; then
 	printf "${YEL}[8] Blessing modified system volume...${NC}\n"
-	if bless --mount "/Volumes/Macintosh HD" --create-snapshot 2>/dev/null; then
+	if bless --mount "$SYS_VOL" --create-snapshot 2>/dev/null; then
 		printf "${GRN}  ✓ System volume snapshot created${NC}\n"
-	elif bless --folder "/Volumes/Macintosh HD/System/Library/CoreServices" --bootefi --create-snapshot 2>/dev/null; then
+	elif bless --folder "$SYS_VOL/System/Library/CoreServices" --bootefi --create-snapshot 2>/dev/null; then
 		printf "${GRN}  ✓ System volume snapshot created (Intel fallback)${NC}\n"
 	else
 		printf "${YEL}  ⚠ Could not create snapshot — changes may not persist${NC}\n"

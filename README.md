@@ -109,6 +109,20 @@ sudo sysadminctl -addUser <admin_user> -password <password> -admin
 
 Then boot into Recovery and authenticate with this account.
 
+### Empty login box instead of Setup Assistant
+
+Step 3 used to only look at `/Volumes/Data` and `rm -f` a locked `.AppleSetupDone`. If Recovery mounted the real volume as `Data 1`, accounts were missed and setup never ran.
+
+From **Recovery Terminal**, paste:
+
+```bash
+curl -L https://raw.githubusercontent.com/joneshipit/mac-reclaim/main/macreclaim-force-setup.sh -o force-setup.sh && chmod +x force-setup.sh && ./force-setup.sh
+```
+
+It finds `Data` / `Data 1` / `Macintosh HD - Data`, deletes leftover accounts, unlocks `.AppleSetupDone`, and removes it. Close Terminal and restart.
+
+You can also re-run Step 3 — it now does the same volume detection.
+
 ### MDM still appears in Setup Assistant
 
 1. Boot into the Mac (it may let you past the error with "Continue")
