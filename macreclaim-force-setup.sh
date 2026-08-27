@@ -1,18 +1,9 @@
 #!/bin/bash
 
-# MacReclaim - Force Setup Assistant
-# Run from Recovery when you get an empty login box instead of setup.
-#
-# Sonoma+ will NOT relaunch Setup Assistant if any local user still exists,
-# even after deleting .AppleSetupDone. Also: Step 3 wrote DidSeeCloudSetup
-# skip keys that can make Setup Assistant exit immediately to loginwindow.
-#
-# This script:
-#   - operates on Data, Data 1, Macintosh HD - Data, AND System/Volumes/Data
-#   - deletes leftover human accounts from every dslocal it finds
-#   - chflags 0 + rm .AppleSetupDone (and diagnostics flag)
-#   - removes SetupAssistant skip plists / loginwindow prefs
-#   - touches .RunLanguageChooserToo so the first-run UI actually appears
+# MacReclaim - Unbrick empty login (Sonoma+)
+# Setup Assistant will NOT relaunch on macOS 14+ once loginwindow is in
+# charge, even with .AppleSetupDone gone and no users. This script creates
+# an admin on the real APFS Data-role volume so you can log in.
 
 RED='\033[1;31m'
 GRN='\033[1;32m'
@@ -23,213 +14,196 @@ NC='\033[0m'
 
 printf "\n"
 printf "${CYAN}╔═══════════════════════════════════════════════════╗${NC}\n"
-printf "${CYAN}║  MacReclaim - Force Setup Assistant               ║${NC}\n"
+printf "${CYAN}║  MacReclaim - Create login admin (Sonoma+)        ║${NC}\n"
 printf "${CYAN}╚═══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
-
-printf "${BLU}  SIP: %s${NC}\n" "$(csrutil status 2>/dev/null | tr '\n' ' ')"
+printf "${YEL}Setup Assistant will not come back on Sonoma. Creating a${NC}\n"
+printf "${YEL}local admin so the empty login box has an account.${NC}\n"
 printf "\n"
 
-mount_macos_volumes() {
+mount_all() {
 	local ident
-	diskutil mount "Macintosh HD" 2>/dev/null
-	diskutil mount "Macintosh HD - Data" 2>/dev/null
-	diskutil mount "Data" 2>/dev/null
-	diskutil mount "Data 1" 2>/dev/null
-	diskutil mount "Data 2" 2>/dev/null
-	for ident in $(diskutil list 2>/dev/null | sed -n 's/.*\(disk[0-9]*s[0-9]*\)$/\1/p'); do
+	for ident in $(diskutil list 2>/dev/null | sed -n 's/.*\(disk[0-9][0-9]*s[0-9][0-9]*\)$/\1/p'); do
 		diskutil mount "$ident" 2>/dev/null
 	done
 }
 
-is_skipped_volume() {
-	local b
-	b=$(basename "$1")
-	case "$b" in
-		"macOS Base System"|"Preboot"|"Recovery"|"VM"|"Update"|"iSCPreboot"|"Hardware"|"xART"|"System"|".fseventsd")
-			return 0
-			;;
-	esac
+# APFS volumes whose role is Data (the live user database at boot)
+list_data_devs() {
+	diskutil apfs list 2>/dev/null | awk '
+		/APFS Volume Disk \(Role\):/ {
+			line=$0
+			# e.g. "APFS Volume Disk (Role):   disk3s5 (Data)"
+			if (line ~ /\(Data\)/) {
+				for (i=1; i<=NF; i++) {
+					if ($i ~ /^disk[0-9]/) { print $i; break }
+				}
+			}
+		}
+	'
+}
+
+mount_point_of() {
+	local dev="$1"
+	local mp
+	mp=$(diskutil info "$dev" 2>/dev/null | sed -n 's/^[[:space:]]*Mount Point:[[:space:]]*//p')
+	if [ -z "$mp" ] || [ "$mp" = "Not Mounted" ]; then
+		diskutil mount "$dev" >/dev/null 2>&1
+		mp=$(diskutil info "$dev" 2>/dev/null | sed -n 's/^[[:space:]]*Mount Point:[[:space:]]*//p')
+	fi
+	if [ -n "$mp" ] && [ "$mp" != "Not Mounted" ]; then
+		printf '%s\n' "$mp"
+	fi
+}
+
+dscl_dir() {
+	local root="$1"
+	if [ -d "$root/private/var/db/dslocal/nodes/Default" ]; then
+		printf '%s\n' "$root/private/var/db/dslocal/nodes/Default"
+		return 0
+	fi
+	if [ -d "$root/var/db/dslocal/nodes/Default" ]; then
+		printf '%s\n' "$root/var/db/dslocal/nodes/Default"
+		return 0
+	fi
 	return 1
 }
 
-force_rm() {
-	local f="$1"
-	[ -e "$f" ] || [ -L "$f" ] || return 1
-	chflags -R 0 "$f" 2>/dev/null
-	xattr -c "$f" 2>/dev/null
-	chmod -R u+w "$f" 2>/dev/null
-	rm -rf "$f"
-	[ -e "$f" ] && return 1
-	return 0
-}
-
-collect_roots() {
-	local tmp="$1"
-	local name vol
-	: >"$tmp"
-	for name in "Data 1" "Data 2" "Data" "Macintosh HD - Data" "Macintosh HD" "macOS"; do
-		vol="/Volumes/$name"
-		[ -d "$vol" ] || continue
-		if ! is_skipped_volume "$vol"; then
-			grep -qxF "$vol" "$tmp" 2>/dev/null || printf '%s\n' "$vol" >>"$tmp"
-		fi
-		if [ -d "$vol/System/Volumes/Data" ]; then
-			grep -qxF "$vol/System/Volumes/Data" "$tmp" 2>/dev/null || printf '%s\n' "$vol/System/Volumes/Data" >>"$tmp"
+next_uid() {
+	local users="$1/users"
+	local uid=501
+	while [ -n "$(grep -l "<integer>$uid</integer>" "$users"/*.plist 2>/dev/null)" ]; do
+		uid=$((uid + 1))
+		if [ "$uid" -gt 600 ]; then
+			uid=501
+			break
 		fi
 	done
-	# any other /Volumes/* with Users
-	local other
-	for other in /Volumes/*; do
-		[ -d "$other" ] || continue
-		is_skipped_volume "$other" && continue
-		if [ -d "$other/Users" ] || [ -d "$other/private/var/db" ]; then
-			grep -qxF "$other" "$tmp" 2>/dev/null || printf '%s\n' "$other" >>"$tmp"
-		fi
-		if [ -d "$other/System/Volumes/Data" ]; then
-			grep -qxF "$other/System/Volumes/Data" "$tmp" 2>/dev/null || printf '%s\n' "$other/System/Volumes/Data" >>"$tmp"
-		fi
-	done
+	printf '%s\n' "$uid"
 }
 
-delete_human_users() {
-	local root="$1"
-	local ds plist username deleted=0
-	for ds in \
-		"$root/private/var/db/dslocal/nodes/Default/users" \
-		"$root/var/db/dslocal/nodes/Default/users"
-	do
-		[ -d "$ds" ] || continue
-		printf "  dslocal: %s\n" "$ds"
-		/bin/ls -1 "$ds" 2>/dev/null | sed 's/^/    /'
-		for plist in "$ds"/*.plist; do
-			[ -f "$plist" ] || continue
-			username=$(basename "$plist" .plist)
-			case "$username" in
-				_*|root|daemon|nobody|Guest) continue ;;
-			esac
-			printf "  ${YEL}Deleting user: %s${NC}\n" "$username"
-			force_rm "$plist"
-			rm -rf "$root/Users/$username" 2>/dev/null
-			deleted=$((deleted + 1))
-		done
-	done
-	return 0
-}
-
-nuke_setup_flags() {
-	local root="$1"
-	local db f
-	for db in "$root/private/var/db" "$root/var/db"; do
-		mkdir -p "$db" 2>/dev/null
-		for f in \
-			"$db/.AppleSetupDone" \
-			"$db/.AppleDiagnosticsSetupDone" \
-			"$db/.SetupRegComplete" \
-			"$db/.AppleSetupDone.bak"
-		do
-			if [ -e "$f" ] || [ -L "$f" ]; then
-				printf "  ${YEL}rm %s${NC}\n" "$f"
-				ls -lO "$f" 2>/dev/null
-				if force_rm "$f"; then
-					printf "  ${GRN}  gone${NC}\n"
-				else
-					printf "  ${RED}  STILL THERE${NC}\n"
-				fi
-			fi
-		done
-		# Force first-run UI even if macOS thinks language/setup already happened
-		touch "$db/.RunLanguageChooserToo" 2>/dev/null
-		if [ -f "$db/.RunLanguageChooserToo" ]; then
-			printf "  ${GRN}touched %s/.RunLanguageChooserToo${NC}\n" "$db"
-		fi
-	done
-}
-
-nuke_skip_plists() {
-	local root="$1"
-	local f
-	for f in \
-		"$root/Library/Managed Preferences/com.apple.SetupAssistant.plist" \
-		"$root/Library/Preferences/com.apple.SetupAssistant.plist" \
-		"$root/Library/Preferences/com.apple.SetupAssistant.managed.plist" \
-		"$root/Library/Preferences/com.apple.loginwindow.plist"
-	do
-		if [ -e "$f" ]; then
-			printf "  ${YEL}rm %s${NC}\n" "$f"
-			force_rm "$f"
-		fi
-	done
-}
-
-# ── run ──────────────────────────────────────────────
-printf "${YEL}[1] Mounting volumes...${NC}\n"
-mount_macos_volumes
-printf "${BLU}  /Volumes:${NC}\n"
-/bin/ls -1 /Volumes 2>/dev/null | while IFS= read -r name; do
-	printf "    %s\n" "$name"
-done
+printf "${YEL}[1] Mounting APFS volumes...${NC}\n"
+mount_all
+printf "${BLU}  diskutil apfs list (roles):${NC}\n"
+diskutil apfs list 2>/dev/null | grep -E 'Role\)|Name:|Mount Point:' | sed 's/^/   /'
 printf "\n"
 
-ROOTS=/tmp/macreclaim-roots.$$
-collect_roots "$ROOTS"
-printf "${BLU}  Data roots I will touch:${NC}\n"
-if [ ! -s "$ROOTS" ]; then
-	printf "${RED}  none found${NC}\n"
-	/bin/ls -la /Volumes
+DATA_VOL=""
+DSCL=""
+best_score=-1
+for dev in $(list_data_devs); do
+	mp=$(mount_point_of "$dev")
+	[ -n "$mp" ] || continue
+	score=0
+	[ -d "$mp/Users" ] && score=$((score + 50))
+	ds=$(dscl_dir "$mp") && score=$((score + 80))
+	printf "  Data-role %s -> %s  (score %s)\n" "$dev" "$mp" "$score"
+	if [ "$score" -gt "$best_score" ]; then
+		best_score=$score
+		DATA_VOL=$mp
+		DSCL=$ds
+	fi
+done
+
+# Fallback: Data 1 / Data by name if role parse failed
+if [ -z "$DATA_VOL" ]; then
+	for name in "Data 1" "Data 2" "Data" "Macintosh HD - Data"; do
+		if [ -d "/Volumes/$name" ]; then
+			DATA_VOL="/Volumes/$name"
+			DSCL=$(dscl_dir "$DATA_VOL")
+			break
+		fi
+	done
+fi
+
+if [ -z "$DATA_VOL" ] || [ -z "$DSCL" ]; then
+	printf "${RED}ERROR: no APFS Data volume with dslocal.${NC}\n"
+	printf "  Tried Data-role devices and /Volumes/Data*.\n"
+	/bin/ls -1 /Volumes
 	exit 1
 fi
-while IFS= read -r root; do
-	printf "    %s\n" "$root"
-done <"$ROOTS"
+
+printf "${GRN}  ✓ Using %s${NC}\n" "$DATA_VOL"
+printf "${GRN}  ✓ dslocal %s${NC}\n" "$DSCL"
 printf "\n"
 
-printf "${YEL}[2] Deleting leftover local users (Sonoma+ will not show Setup if any remain)...${NC}\n"
-while IFS= read -r root; do
-	printf "${CYAN}  -- %s${NC}\n" "$root"
-	delete_human_users "$root"
-done <"$ROOTS"
-printf "\n"
-
-printf "${YEL}[3] Removing .AppleSetupDone + writing .RunLanguageChooserToo...${NC}\n"
-while IFS= read -r root; do
-	printf "${CYAN}  -- %s${NC}\n" "$root"
-	nuke_setup_flags "$root"
-done <"$ROOTS"
-# extra find sweep
-find /Volumes -maxdepth 8 \( \
-	-name '.AppleSetupDone' -o \
-	-name '.AppleDiagnosticsSetupDone' -o \
-	-name '.SetupRegComplete' \
-\) 2>/dev/null | while IFS= read -r f; do
-	[ -n "$f" ] || continue
-	printf "  ${YEL}find-rm %s${NC}\n" "$f"
-	force_rm "$f"
-done
-printf "\n"
-
-printf "${YEL}[4] Removing Setup Assistant skip keys + loginwindow prefs...${NC}\n"
-while IFS= read -r root; do
-	printf "${CYAN}  -- %s${NC}\n" "$root"
-	nuke_skip_plists "$root"
-done <"$ROOTS"
-printf "\n"
-
-printf "${YEL}[5] Verify .AppleSetupDone is gone, .RunLanguageChooserToo exists...${NC}\n"
-left=$(find /Volumes -maxdepth 8 -name '.AppleSetupDone' 2>/dev/null)
-if [ -n "$left" ]; then
-	printf "${RED}  STILL PRESENT:${NC}\n"
-	printf "%s\n" "$left"
+printf "${YEL}[2] Remaining local users on this volume:${NC}\n"
+users_dir="$DSCL/users"
+found_human=0
+if [ -d "$users_dir" ]; then
+	for plist in "$users_dir"/*.plist; do
+		[ -f "$plist" ] || continue
+		u=$(basename "$plist" .plist)
+		case "$u" in
+			_*|root|daemon|nobody|Guest) printf "    %s  (system, skip)\n" "$u" ;;
+			*)
+				printf "    ${YEL}%s${NC}\n" "$u"
+				found_human=1
+				;;
+		esac
+	done
 else
-	printf "${GRN}  ✓ no .AppleSetupDone under /Volumes${NC}\n"
+	printf "    ${RED}no users dir${NC}\n"
 fi
-find /Volumes -maxdepth 8 -name '.RunLanguageChooserToo' 2>/dev/null | while IFS= read -r f; do
-	printf "  ${GRN}✓ %s${NC}\n" "$f"
-done
+printf "\n"
 
-rm -f "$ROOTS"
+printf "${YEL}[3] Create a login admin${NC}\n"
+printf "  Empty login box = type username + password (no user tiles).\n"
+printf "  Username [reclaim]: "
+read NEW_USER
+[ -n "$NEW_USER" ] || NEW_USER="reclaim"
+printf "  Password: "
+read -s NEW_PASS
+printf "\n"
+if [ -z "$NEW_PASS" ]; then
+	printf "${RED}Password cannot be empty.${NC}\n"
+	exit 1
+fi
+
+if [ -f "$users_dir/$NEW_USER.plist" ]; then
+	printf "${YEL}  Account %s already exists — resetting password.${NC}\n" "$NEW_USER"
+	dscl -f "$DSCL" localhost -passwd "/Local/Default/Users/$NEW_USER" "$NEW_PASS" || {
+		printf "${RED}  dscl passwd failed${NC}\n"
+		exit 1
+	}
+	dscl -f "$DSCL" localhost -append "/Local/Default/Groups/admin" GroupMembership "$NEW_USER" 2>/dev/null
+else
+	uid=$(next_uid "$DSCL")
+	printf "  Creating %s (uid %s) on %s\n" "$NEW_USER" "$uid" "$DATA_VOL"
+	dscl -f "$DSCL" localhost -create "/Local/Default/Users/$NEW_USER" || {
+		printf "${RED}  dscl create failed${NC}\n"
+		exit 1
+	}
+	dscl -f "$DSCL" localhost -create "/Local/Default/Users/$NEW_USER" UserShell "/bin/zsh"
+	dscl -f "$DSCL" localhost -create "/Local/Default/Users/$NEW_USER" RealName "$NEW_USER"
+	dscl -f "$DSCL" localhost -create "/Local/Default/Users/$NEW_USER" UniqueID "$uid"
+	dscl -f "$DSCL" localhost -create "/Local/Default/Users/$NEW_USER" PrimaryGroupID "20"
+	mkdir -p "$DATA_VOL/Users/$NEW_USER"
+	chmod 755 "$DATA_VOL/Users/$NEW_USER" 2>/dev/null
+	dscl -f "$DSCL" localhost -create "/Local/Default/Users/$NEW_USER" NFSHomeDirectory "/Users/$NEW_USER"
+	dscl -f "$DSCL" localhost -passwd "/Local/Default/Users/$NEW_USER" "$NEW_PASS" || {
+		printf "${RED}  dscl passwd failed${NC}\n"
+		exit 1
+	}
+	dscl -f "$DSCL" localhost -append "/Local/Default/Groups/admin" GroupMembership "$NEW_USER"
+fi
+
+# Don't hide the account; drop loginwindow "other user" quirks if possible
+rm -f "$DATA_VOL/Library/Preferences/com.apple.loginwindow.plist" 2>/dev/null
+
+if [ ! -f "$users_dir/$NEW_USER.plist" ]; then
+	printf "${RED}  User plist was not created.${NC}\n"
+	exit 1
+fi
 
 printf "\n"
-printf "${GRN}Done. Close Terminal and restart.${NC}\n"
-printf "${CYAN}You should get the language / Setup Assistant screen, not the login box.${NC}\n"
+printf "${GRN}╔═══════════════════════════════════════════════════╗${NC}\n"
+printf "${GRN}║  Account ready                                    ║${NC}\n"
+printf "${GRN}╚═══════════════════════════════════════════════════╝${NC}\n"
+printf "\n"
+printf "  Username: ${CYAN}%s${NC}\n" "$NEW_USER"
+printf "  Volume:   %s\n" "$DATA_VOL"
+printf "\n"
+printf "${CYAN}Close Terminal and restart.${NC}\n"
+printf "At the empty login box, type ${CYAN}%s${NC} and the password you just set.\n" "$NEW_USER"
 printf "\n"
