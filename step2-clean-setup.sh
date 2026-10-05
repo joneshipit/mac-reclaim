@@ -214,7 +214,11 @@ cat > "$managed_dir/com.apple.SetupAssistant.plist" << 'SKIPEOF'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>SkipCloudSetup</key>
+	<true/>
 	<key>SkipDeviceManagement</key>
+	<true/>
+	<key>DidSeeCloudSetup</key>
 	<true/>
 </dict>
 </plist>
@@ -318,7 +322,7 @@ echo -e "     ${GRN}csrutil disable${NC}"
 echo -e "     ${GRN}csrutil authenticated-root disable${NC}"
 echo -e "  4. Then run Step 3:"
 echo ""
-echo -e "  ${YEL}curl -L https://raw.githubusercontent.com/joneshipit/mac-reclaim/main/macreclaim-step3.sh -o step3.sh && chmod +x step3.sh && ./step3.sh${NC}"
+echo -e "  ${YEL}curl -L https://raw.githubusercontent.com/joneshipit/bypass-mdm-clean/main/step3-cleanup.sh -o step3.sh && chmod +x step3.sh && ./step3.sh${NC}"
 echo ""
 echo -e "  5. Reboot → clean Setup Assistant"
 echo ""
