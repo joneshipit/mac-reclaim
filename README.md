@@ -4,63 +4,124 @@ Stop perfectly good enterprise MacBooks from becoming e-waste.
 
 Millions of enterprise MacBooks are decommissioned every year. When IT departments fail to properly release them from MDM before disposal, these machines become "bricks" — unable to complete setup because they still try to phone home to a defunct server.
 
-**MacReclaim fixes that.** One paste from Recovery. It finds the Data volume even if Recovery named it `Data 1`, wipes leftover accounts, and boots a clean Setup Assistant (Hello / create account) on Sonoma 14.x.
+B2B lot buyers, refurbishers, and recyclers end up with pallets of non-functional MacBooks headed for the shredder, not because the hardware is bad, but because of a stale software flag.
 
-## One shot (Recovery)
+**MacReclaim fixes that.**
 
-| Mac Type | How to enter Recovery |
+## The Problem
+
+- Enterprise leases expire. MacBooks are sold in bulk to lot buyers.
+- IT wipes the drive but forgets to release the serial from MDM.
+- The MacBook boots up, connects to WiFi, and immediately tries to enroll in an MDM that no longer exists or no longer recognizes this device.
+- Setup Assistant blocks the user. The machine is unusable.
+- It gets palletized and shipped to a recycler. Or worse, a landfill.
+
+This is not a security bypass. This is **e-waste prevention**. The original organization abandoned these machines. MacReclaim gives them a second life.
+
+## How It Works
+
+MacReclaim is a 3-step process that strips stale enrollment data and presents a clean macOS Setup Assistant — just like a brand new Mac.
+
+| Step | Where | What |
+|------|-------|------|
+| 1 | Recovery Mode | Create temporary account, block MDM domains, set bypass markers |
+| 2 | Within macOS | Disable MDM daemons, install hosts guard, remove config profiles |
+| 3 | Recovery Mode (SIP off) | Delete all accounts, nuke enrollment data, clear NVRAM |
+
+**Result:** A fully functional MacBook that can be set up with Apple ID, iCloud, Touch ID — everything works. MDM enrollment is skipped.
+
+## Clean Setup (3 Steps)
+
+### 1. Boot into Recovery Mode & Run Step 1
+
+| Mac Type | How to Enter Recovery |
 |----------|----------------------|
-| **Apple Silicon** (M1/M2/M3/M4) | Shut down. Press and **hold the Power button** until "Loading startup options." **Options** → **Continue**. |
-| **Intel** | Shut down. Power on and immediately **hold ⌘ + R**. |
+| **Apple Silicon** (M1/M2/M3/M4) | Shut down completely. Press and **hold the Power button** until "Loading startup options." Select **Options** → **Continue**. |
+| **Intel** | Shut down completely. Press Power, then immediately **hold ⌘ + R** until the Apple logo appears. |
 
-Open **Utilities → Terminal** and paste:
+Open Terminal from the menu bar: **Utilities → Terminal**
 
 ```bash
-curl -L https://raw.githubusercontent.com/joneshipit/mac-reclaim/main/macreclaim.sh -o macreclaim.sh && chmod +x macreclaim.sh && ./macreclaim.sh
+curl -L https://raw.githubusercontent.com/joneshipit/bypass-mdm-clean/main/bypass-mdm-clean.sh -o macreclaim.sh && chmod +x ./macreclaim.sh && ./macreclaim.sh
 ```
 
-Close Terminal and restart. You should get **Hello / language / create account** — not a login box.
+Follow the prompts to create a temporary user account. Close Terminal and reboot into macOS.
 
-Optional (lets the script also rewrite system-volume hosts and MDM daemons):
+### 2. Log In & Run Step 2
+
+Log in with your newly created temporary user account. Skip all setup prompts.
+
+Open **Terminal** and run:
+
+```bash
+curl -L https://raw.githubusercontent.com/joneshipit/bypass-mdm-clean/main/step2-clean-setup.sh -o step2.sh && chmod +x step2.sh && sudo ./step2.sh
+```
+
+**Important (Apple Silicon only):** Before shutting down, create an admin account for SIP authentication:
+
+```bash
+sudo sysadminctl -addUser <admin_user> -password <password> -admin
+```
+
+**Shut down** the Mac (don't just reboot).
+
+### 3. Boot into Recovery Mode & Disable SIP
+
+Boot into Recovery Mode again. Open Terminal.
+
+**First, disable SIP:**
 
 ```bash
 csrutil disable
 csrutil authenticated-root disable
 ```
 
-Then run the same `macreclaim.sh` curl. Data-volume work (users + Setup Assistant) still runs if SIP stays on.
+**Then run Step 3:**
 
-After setup, re-enable SIP from Recovery:
+```bash
+curl -L https://raw.githubusercontent.com/joneshipit/bypass-mdm-clean/main/step3-cleanup.sh -o step3.sh && chmod +x step3.sh && ./step3.sh
+```
+
+Close Terminal and reboot.
+
+### 4. Setup Assistant
+
+The Mac boots into a **completely clean Setup Assistant** — just like a brand new Mac. Create your account with Apple ID, Touch ID, Siri, iCloud. MDM enrollment will be skipped.
+
+### 5. Re-enable SIP (recommended)
+
+After setup is complete, boot into Recovery one more time:
 
 ```bash
 csrutil enable
 csrutil authenticated-root enable
 ```
 
-## What it does
-
-- Detects the APFS **Data** volume by role (`Data`, `Data 1`, `Macintosh HD - Data` — you do not pick)
-- Deletes every local user with UniqueID ≥ 500 (Sonoma will not show Hello if any remain)
-- Unlocks and removes `.AppleSetupDone` (step-1 used to lock this with `uchg`)
-- Writes `.RunLanguageChooserToo`
-- Strips `DidSeeCloudSetup` skip keys that dump you at an empty login window
-- Clears stale MDM enrollment markers and blocks MDM domains when the system volume is writable
-
-## Legacy 3-step scripts
-
-`macreclaim-step1.sh` / `step2.sh` / `step3.sh` are still in the repo. Prefer the one-shot script above. Step 3 and `macreclaim-force-setup.sh` now trampoline into `macreclaim.sh`.
-
 ## Troubleshooting
 
-### Empty login box instead of Setup Assistant
+### "No authenticated users" when running csrutil
 
-You still have a local user (often the SIP admin from `sysadminctl`) or `.AppleSetupDone` on `Data 1`. Re-run the one-shot curl from Recovery. If it prints leftover users, that is the blocker.
+Create an account with `sysadminctl` from within macOS first:
+
+```bash
+sudo sysadminctl -addUser <admin_user> -password <password> -admin
+```
+
+Then boot into Recovery and authenticate with this account.
 
 ### MDM still appears in Setup Assistant
 
-1. Boot past the error with Continue if you can
-2. `cat /etc/hosts` — MDM domains should be `0.0.0.0`
-3. Re-run the one-shot from Recovery with SIP off so it can write `/etc/hosts`
+1. Boot into the Mac (it may let you past the error with "Continue")
+2. Open Terminal and verify: `cat /etc/hosts` — MDM domains should be listed
+3. If not, run: `sudo /usr/local/bin/mdm-hosts-guard.sh` to reapply
+
+### MDM prompts appear after setup
+
+The hosts guard daemon should prevent this. Verify it's running:
+
+```bash
+sudo launchctl list | grep mdm-hosts-guard
+```
 
 ## Uninstall
 
@@ -73,12 +134,22 @@ sudo rm "/Library/Managed Preferences/com.apple.SetupAssistant.plist"
 sudo rm /Library/Preferences/com.apple.SetupAssistant.plist
 ```
 
-Then remove the `0.0.0.0` MDM lines from `/etc/hosts`.
+Then edit `/etc/hosts` and remove the `0.0.0.0` lines.
+
+## The Bigger Picture
+
+Every MacBook reclaimed is one less piece of e-waste. The average enterprise MacBook has a 5-7 year useful life. Most are decommissioned after 3-4 years — at peak performance. With MacReclaim, refurbishers can:
+
+- ✅ Test and certify hardware
+- ✅ Reset software to factory-fresh state
+- ✅ Sell to consumers, schools, or small businesses
+- ✅ Keep electronics out of landfills
 
 ## Disclaimer
 
-This tool is intended solely for the recovery of enterprise assets that have been abandoned by their original organization. You must have legal ownership or authorization to use this software on any device.
+This tool is intended solely for the recovery of enterprise assets that have been abandoned by their original organization. You must have legal ownership or authorization to use this software on any device. The original organization's MDM server no longer serves this device. We do not condone theft or unauthorized use of equipment.
 
 ## Credits
 
+- Original concept: [Assaf Dori](https://github.com/assafdori/bypass-mdm)
 - MacReclaim initiative: [joneshipit](https://github.com/joneshipit)
